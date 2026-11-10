@@ -1,0 +1,16 @@
+# Local and generated files
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# The assignment PDF and the report must never be pushed to GitHub.
+Задание.pdf
+ОТЧЕТ.md
+report/
+deployment.txt
+
+# CI-generated directories
+dist/
+deploy/

@@ -1,0 +1,227 @@
+name: Practice 4 CI
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+      - "rc-*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: practice4-ci-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_IMAGE: python:3.11.10-slim
+  PYTHON_VERSION: "3.11.10"
+  CI_COMMIT_SHA: ${{ github.sha }}
+  CI_PIPELINE_ID: ${{ github.run_id }}
+  APP_PORT: ${{ vars.APP_PORT || '8108' }}
+
+jobs:
+  validate:
+    name: validate
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show Python version, commit and pipeline
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            --user "$(id -u):$(id -g)" \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            "${PYTHON_IMAGE}" python --version
+          echo "Python image: ${PYTHON_IMAGE}"
+          echo "Commit: ${CI_COMMIT_SHA}"
+          echo "Pipeline ID: ${CI_PIPELINE_ID}"
+          echo "Ref: ${GITHUB_REF}"
+          echo "APP_PORT: ${APP_PORT}"
+
+      - name: Compile every Python file
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            --user "$(id -u):$(id -g)" \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            "${PYTHON_IMAGE}" \
+            python -m compileall -q -x '(^|/)\.git/' .
+
+      - name: Check required keys of the example configuration (variant 8)
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            --user "$(id -u):$(id -g)" \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            "${PYTHON_IMAGE}" \
+            python scripts/check_example_config.py config.json.example
+
+  unit_tests:
+    name: unit_tests
+    needs: validate
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run unittest suite
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            --user "$(id -u):$(id -g)" \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            -e APP_PORT="${APP_PORT}" \
+            "${PYTHON_IMAGE}" \
+            python -m unittest discover -s tests -v
+
+  package:
+    name: package
+    needs:
+      - validate
+      - unit_tests
+    if: >-
+      (github.event_name == 'push' &&
+       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))) ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build dist and manifest
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist
+          cp config_check.py README.md Dockerfile config.json.example dist/
+          {
+            echo "commit: ${CI_COMMIT_SHA}"
+            echo "pipeline_id: ${CI_PIPELINE_ID}"
+            echo "ref: ${GITHUB_REF}"
+            echo "generated_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "files:"
+            (cd dist && find . -maxdepth 1 -type f ! -name manifest.txt -printf '%f\n' \
+              | LC_ALL=C sort | sed 's/^/  - /')
+          } > dist/manifest.txt
+          echo "----- manifest.txt -----"
+          cat dist/manifest.txt
+          echo "----- dist contents -----"
+          ls -l dist
+          test "$(grep -c '^  - ' dist/manifest.txt)" -eq 4
+          for required in config_check.py README.md Dockerfile config.json.example; do
+            test -f "dist/${required}"
+          done
+
+      - name: Publish dist artifact for 7 days
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy_test:
+    name: deploy_test
+    needs: package
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: test/config
+      url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: deploy/test
+
+      - name: Check DEPLOY_TOKEN without exposing its value
+        env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DEPLOY_TOKEN:-}" ]; then
+            echo "::error::DEPLOY_TOKEN is not configured"
+            exit 1
+          fi
+          echo "DEPLOY_TOKEN is present (${#DEPLOY_TOKEN} characters); value is masked and is not printed."
+
+      - name: Deploy artifact and run smoke check
+        env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -f deploy/test/manifest.txt
+          test -f deploy/test/config_check.py
+
+          docker run --rm \
+            -v "$PWD/deploy/test:/work" -w /work \
+            --user "$(id -u):$(id -g)" \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            -e APP_PORT="${APP_PORT}" \
+            "${PYTHON_IMAGE}" \
+            python config_check.py --config config.json.example > deploy/test/smoke.log
+          grep -q '^OK: configuration config.json.example is valid$' deploy/test/smoke.log
+
+          {
+            echo "deployment_report"
+            echo "environment: test/config"
+            echo "environment_url: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "commit: ${CI_COMMIT_SHA}"
+            echo "pipeline_id: ${CI_PIPELINE_ID}"
+            echo "deployed_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "app_port: ${APP_PORT}"
+            echo "deploy_token_present: yes (value not printed)"
+            echo "smoke_check: PASSED"
+            echo "smoke_command: python config_check.py --config config.json.example"
+            echo "smoke_result:"
+            sed 's/^/  /' deploy/test/smoke.log
+            echo "artifact_manifest:"
+            sed 's/^/  /' deploy/test/manifest.txt
+          } > deploy/test/deployment.txt
+
+          echo "----- deployment.txt -----"
+          cat deploy/test/deployment.txt
+
+      - name: Upload deployment report
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-report
+          path: |
+            deploy/test/deployment.txt
+            deploy/test/smoke.log
+          if-no-files-found: error
+          retention-days: 7

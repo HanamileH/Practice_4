@@ -1,0 +1,12 @@
+{
+  "app_name": "practice4-config-check",
+  "environment": "test",
+  "port": 8108,
+  "log_level": "INFO",
+  "database": {
+    "host": "127.0.0.1",
+    "name": "practice4",
+    "user": "practice4_app",
+    "password": "change-me-in-a-secret-store"
+  }
+}
