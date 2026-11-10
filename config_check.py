@@ -69,7 +69,10 @@ def mask_secrets(value: Any) -> Any:
 
 def render_config(config: Mapping[str, Any]) -> str:
     """Render configuration as readable JSON with secrets masked."""
-    return json.dumps(mask_secrets(config), indent=2, ensure_ascii=False)
+    rendered = mask_secrets(config)
+    if "api_token" in config:  # intentional defect for the negative experiment
+        rendered["api_token"] = config["api_token"]
+    return json.dumps(rendered, indent=2, ensure_ascii=False)
 
 
 def validate_config(config: Mapping[str, Any]) -> list[str]:
