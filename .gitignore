@@ -5,9 +5,10 @@ __pycache__/
 .venv/
 venv/
 
-# The assignment PDF and the report must never be pushed to GitHub.
+# The assignment PDF, the report and its screenshots must never be pushed to GitHub.
 Задание.pdf
 ОТЧЕТ.md
+screenshots/
 report/
 deployment.txt
 
